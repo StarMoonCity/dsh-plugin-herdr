@@ -1,12 +1,18 @@
 // 左侧边栏会话列表 herdr 打标控制器（design: session-list-branding）。
-// 思路：订阅 sessions.list 的 ObservableSnapshot，派生 herdr 会话集合（agentPreset === HERDR_PRESET_ID），
+// 思路：订阅 sessions.list 的 ObservableSnapshot，派生 herdr 会话集合（投影值 agentPreset），
 // 通过 MutationObserver + rAF 批量为左侧边栏中对应会话行在名称前插入 herdr logo（SVG），
 // 非 herdr 行移除 logo；幂等（重复 patch 不重复插入，重复调用不重复创建节点），
 // 清理时断开 observer/订阅并取消 rAF。
 
-import { HERDR_PRESET_ID } from '../client-logic.ts'
+import { isHerdrPresetRow, type SessionListRowLike } from '../client-logic.ts'
 import { HERDR_LOGO_PATH_D } from './logo-path.ts'
 import type { SessionListLike } from './mode.ts'
+
+/** 侧栏打标额外用到的行字段（标题兜底匹配）。 */
+type SessionRowLike = SessionListRowLike & {
+  displayTitle?: string
+  title?: string
+}
 
 const LOGO_CLASS = 'herdr-session-logo'
 const ROW_ATTR = 'data-herdr-session'
@@ -14,11 +20,11 @@ const REGION_SELECTOR = '[class*="regionArea"]'
 const SESSION_ROW_SELECTOR = '[class*="sessionRow"]'
 const TREEITEM_SELECTOR = '[role="treeitem"]'
 
-function getHerdrSessionIds(byId?: Record<string, { agentPreset?: string }>): Set<string> {
+function getHerdrSessionIds(byId?: Record<string, SessionRowLike>): Set<string> {
   const s = new Set<string>()
   if (!byId) return s
   for (const [id, v] of Object.entries(byId)) {
-    if (v?.agentPreset === HERDR_PRESET_ID) s.add(id)
+    if (isHerdrPresetRow(v)) s.add(id)
   }
   return s
 }
@@ -88,7 +94,7 @@ function getSessionIdFromFiber(row: Element): string | null {
   return null
 }
 
-function extractSessionId(row: Element, byId: Record<string, { agentPreset?: string }>): string | null {
+function extractSessionId(row: Element, byId: Record<string, SessionRowLike>): string | null {
   const fiberId = getSessionIdFromFiber(row)
   if (fiberId) return fiberId
   // 兜底：属性/ dataset 匹配（兼容未来 DOM 形态）
@@ -121,14 +127,12 @@ function extractSessionId(row: Element, byId: Record<string, { agentPreset?: str
   const titleText = (titleEl?.textContent ?? row.textContent ?? '').trim()
   if (titleText) {
     for (const [id, v] of Object.entries(byId)) {
-      const dh = (v as { displayTitle?: string; title?: string }).displayTitle
-        ?? (v as { title?: string }).title
+      const dh = v.displayTitle ?? v.title
       if (dh && (titleText === dh || dh.includes(titleText) || titleText.includes(dh))) return id
     }
     // 基于 ids 顺序的弱匹配：若标题能精确命中某个 displayTitle 的前缀，则认为匹配
     for (const [id, v] of Object.entries(byId)) {
-      const dh = (v as { displayTitle?: string; title?: string }).displayTitle
-        ?? (v as { title?: string }).title
+      const dh = v.displayTitle ?? v.title
       if (!dh) continue
       const a = dh.slice(0, 12)
       const b = titleText.slice(0, 12)

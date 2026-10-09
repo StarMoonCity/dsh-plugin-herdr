@@ -787,15 +787,59 @@ export function terminalFocusTransition(
 // filterGroupsToSession：面板只保留包含本会话绑定 pane 的 workspace 组。
 // ---------------------------------------------------------------------------
 
-/** herdr agent preset id（与服务端 preset-install.ts 的 PRESET_ID 一致；两处需同步修改）。 */
+/**
+ * herdr agent preset id。
+ * 权威声明在 cordis.patch.yml 的 `preset-herdr` 行（`config.id`）——两处需同步修改，
+ * test/unit/client-logic.test.ts 的 MG-02 用例直接读 patch 文件做漂移哨兵。
+ */
 export const HERDR_PRESET_ID = 'herdr'
 
-/** 会话列表状态 → 当前会话是否为 herdr 模式（agentPreset === HERDR_PRESET_ID）。 */
+/**
+ * 会话列表单行的最小形状（DSH 0.2）。
+ * - `agentPreset` 在 0.2 从 `SessionSummary` 顶层移入 `projectionValues`（宿主投影值）；
+ * - `retainedBy.mainView` 是"当前/主会话"的权威标记（旧的 `SessionListState.current` 已移除）。
+ */
+export interface SessionListRowLike {
+  id?: string
+  retainedBy?: { mainView?: number }
+  projectionValues?: { agentPreset?: string }
+}
+
+/** 会话列表快照最小形状（`ObservableSnapshot<SessionListState>` 的子集）。 */
+export interface SessionListSnapshotLike {
+  byId?: Record<string, SessionListRowLike>
+}
+
+/**
+ * 快照 → 当前（主）会话 id。
+ *
+ * DSH 0.2 移除了 `SessionListState.current`（现仅有 ids / byId / phase /
+ * projectionsBySession）。宿主自身以 mainView 持有标记定位主会话，见
+ * `@deepseek-ai/dsh-client-ui-workspace`：
+ * `Object.values(list.byId).find(s => (s.retainedBy.mainView ?? 0) > 0)?.id`。
+ */
+export function deriveCurrentSessionId(
+  snapshot: SessionListSnapshotLike | undefined,
+): string | undefined {
+  const byId = snapshot?.byId
+  if (!byId) return undefined
+  for (const [id, row] of Object.entries(byId)) {
+    if ((row?.retainedBy?.mainView ?? 0) > 0) return row?.id ?? id
+  }
+  return undefined
+}
+
+/** 会话列表行 → 是否为 herdr 模式（preset id 走投影值，大小写敏感）。 */
+export function isHerdrPresetRow(row: SessionListRowLike | undefined): boolean {
+  return row?.projectionValues?.agentPreset === HERDR_PRESET_ID
+}
+
+/** 会话列表状态 → 当前会话是否为 herdr 模式（projectionValues.agentPreset === HERDR_PRESET_ID）。 */
 export function deriveHerdrMode(
-  byId: Record<string, { agentPreset?: string }> | undefined,
+  byId: Record<string, SessionListRowLike> | undefined,
   current: string | undefined,
 ): boolean {
-  return byId?.[current ?? '']?.agentPreset === HERDR_PRESET_ID
+  return isHerdrPresetRow(byId?.[current ?? ''])
 }
 
 /**

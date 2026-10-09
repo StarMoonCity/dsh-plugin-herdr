@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { SocketHerdrClient } from './client/socket.ts'
 import { resolveSession, resolveSocketPath, type Config } from './config.ts'
-import { ensureHerdrPreset } from './preset-install.ts'
 import { createLogger } from './log.ts'
 
 // cordis 通过模块导出的 Config 校验插件配置并填充默认值
@@ -25,8 +24,9 @@ export const name = 'dsh-plugin-herdr-client'
  * inject ['herdr'] 保证服务已就绪，且 webServer 路由可在此注册。
  */
 export function apply(ctx: Context, config: Config) {
-  // herdr 模式 preset：复制到 $DSH_HOME/.agent-presets/（新建会话的模式选择器可见）
-  ensureHerdrPreset(undefined, createLogger(ctx, 'preset'))
+  // herdr 模式 preset 由本包的 cordis.patch.yml 声明为
+  // `@deepseek-ai/dsh-agent-preset` 行（DSH 0.2：registry 不再扫描
+  // $DSH_HOME/.agent-presets/ 目录，旧的 ensureHerdrPreset 文件复制机制已移除）。
 
   const socketPath = resolveSocketPath(config)
   if (!socketPath) {

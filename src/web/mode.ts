@@ -5,14 +5,15 @@
 // 就绪后立即翻转（同步内存数据，无可见闪烁）。
 
 import { useEffect, useState } from 'react'
-import { deriveHerdrMode } from '../client-logic.ts'
+import {
+  deriveCurrentSessionId,
+  deriveHerdrMode,
+  type SessionListSnapshotLike,
+} from '../client-logic.ts'
 
 /** sessions.list 的最小形状（ObservableSnapshot<SessionListState> 的子集）。 */
-export interface SessionListLike {
-  getSnapshot(): {
-    byId?: Record<string, { agentPreset?: string }>
-    current?: string
-  }
+export type SessionListLike = SessionListSnapshotLike & {
+  getSnapshot(): SessionListSnapshotLike
   subscribe(fn: () => void): () => void
 }
 
@@ -34,7 +35,8 @@ function setMode(next: boolean): void {
 export function startModeTracking(list: SessionListLike): () => void {
   const update = () => {
     const s = list.getSnapshot()
-    setMode(deriveHerdrMode(s.byId, s.current))
+    // DSH 0.2：当前会话不再由快照的 `current` 字段给出，改由 mainView 持有标记推导。
+    setMode(deriveHerdrMode(s.byId, deriveCurrentSessionId(s)))
   }
   update()
   const unsubscribe = list.subscribe(update)

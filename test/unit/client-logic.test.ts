@@ -12,6 +12,7 @@ import {
   compareWorkspaceId,
   computeSnapPosition,
   createStatusStore,
+  deriveCurrentSessionId,
   deriveHerdrMode,
   dialogFocusModel,
   disclosureState,
@@ -543,14 +544,63 @@ test('agentTheme: prefix match with lowercase', () => {
 // Herdr 模式判定与面板会话聚焦（design: herdr-mode-gating MG-02）
 // ---------------------------------------------------------------------------
 
-test('MG-02: HERDR_PRESET_ID 与服务端 preset id 一致（preset-install.ts PRESET_ID）', () => {
+test('MG-02: HERDR_PRESET_ID 与 cordis.patch.yml 的 preset 行 config.id 一致', async () => {
+  // DSH 0.2 漂移哨兵：preset 不再是 $DSH_HOME/.agent-presets/ 目录，而是组合行。
+  // 直接读 patch 文件，保证客户端判定用的 id 与服务端声明的 preset id 不会漂移。
+  const { readFile } = await import('node:fs/promises')
+  const patch = await readFile(new URL('../../cordis.patch.yml', import.meta.url), 'utf8')
+  const presetRow = patch.slice(patch.indexOf('preset-herdr'))
+  const declaredId = /^\s+id:\s*(\S+)\s*$/m.exec(presetRow)?.[1]
   assert.equal(HERDR_PRESET_ID, 'herdr')
+  assert.equal(declaredId, HERDR_PRESET_ID, 'cordis.patch.yml 的 preset config.id 必须等于 HERDR_PRESET_ID')
+})
+
+test('MG-02: cordis.patch.yml 声明的 persona 使用 0.2 的 prefix（不再用已移除的 text）', async () => {
+  // DSH 0.2：dsh-persona 的 `text` 键已移除，迁移为 prefix/suffix。
+  const { readFile } = await import('node:fs/promises')
+  const patch = await readFile(new URL('../../cordis.patch.yml', import.meta.url), 'utf8')
+  const personaRow = patch.slice(patch.indexOf('- id: persona'))
+  const block = personaRow.slice(0, personaRow.indexOf('- id: herdr-session-mode'))
+  assert.match(block, /^\s+prefix:\s*>?/m, 'persona 应声明 prefix')
+  assert.doesNotMatch(block, /^\s+text:/m, 'persona 不得再声明已移除的 text 键')
+})
+
+test('DSH-0.2: deriveCurrentSessionId 用 retainedBy.mainView 定位主会话（current 字段已移除）', () => {
+  // DSH 0.2 移除了 SessionListState.current；宿主自身以 mainView 持有标记定位主会话，
+  // 见 @deepseek-ai/dsh-client-ui-workspace：Object.values(list.byId)
+  //   .find(s => (s.retainedBy.mainView ?? 0) > 0)?.id
+  const byId = {
+    s1: { id: 's1', retainedBy: { mainView: 0 } },
+    s2: { id: 's2', retainedBy: { mainView: 1 } },
+    s3: { id: 's3' },
+  }
+  assert.equal(deriveCurrentSessionId({ byId }), 's2')
+  // 无持有者 / 空快照 / 无 byId
+  assert.equal(deriveCurrentSessionId({ byId: { s1: { retainedBy: { mainView: 0 } } } }), undefined)
+  assert.equal(deriveCurrentSessionId({}), undefined)
+  assert.equal(deriveCurrentSessionId(undefined), undefined)
+  // 行的 id 缺失时回退到 byId 的键
+  assert.equal(deriveCurrentSessionId({ byId: { s9: { retainedBy: { mainView: 2 } } } }), 's9')
+})
+
+test('DSH-0.2: deriveHerdrMode 与 deriveCurrentSessionId 端到端判定', () => {
+  const byId = {
+    s1: { id: 's1', retainedBy: { mainView: 0 }, projectionValues: { agentPreset: 'herdr' } },
+    s2: { id: 's2', retainedBy: { mainView: 1 }, projectionValues: { agentPreset: 'herdr' } },
+  }
+  assert.equal(deriveHerdrMode(byId, deriveCurrentSessionId({ byId })), true)
+  // 主会话换成非 herdr preset → false（另一个 herdr 会话不再影响判定）
+  const byId2 = {
+    s1: { id: 's1', retainedBy: { mainView: 1 }, projectionValues: { agentPreset: 'standard' } },
+    s2: { id: 's2', retainedBy: { mainView: 0 }, projectionValues: { agentPreset: 'herdr' } },
+  }
+  assert.equal(deriveHerdrMode(byId2, deriveCurrentSessionId({ byId: byId2 })), false)
 })
 
 test('MG-02: deriveHerdrMode 按当前会话 agentPreset 判定', () => {
   const byId = {
-    s1: { agentPreset: 'herdr' },
-    s2: { agentPreset: 'default' },
+    s1: { projectionValues: { agentPreset: 'herdr' } },
+    s2: { projectionValues: { agentPreset: 'default' } },
     s3: {},
   }
   assert.equal(deriveHerdrMode(byId, 's1'), true)
@@ -560,8 +610,8 @@ test('MG-02: deriveHerdrMode 按当前会话 agentPreset 判定', () => {
   assert.equal(deriveHerdrMode(byId, 's9'), false)
   assert.equal(deriveHerdrMode(byId, undefined), false)
   assert.equal(deriveHerdrMode(undefined, 's1'), false)
-  // 大小写敏感（preset id 是目录名）
-  assert.equal(deriveHerdrMode({ s1: { agentPreset: 'Herdr' } }, 's1'), false)
+  // 大小写敏感（preset id）
+  assert.equal(deriveHerdrMode({ s1: { projectionValues: { agentPreset: 'Herdr' } } }, 's1'), false)
 })
 
 test('MG-02: filterGroupsToSession 只保留包含 selfPaneId 的 workspace 组', () => {

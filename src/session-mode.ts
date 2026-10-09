@@ -124,20 +124,26 @@ export function apply(ctx: Context, config: Config) {
   }
 
   /**
-   * 会话标题：折叠 session.events 中最新一条 session/title 事件（last-wins）。
-   * 无标题/事件缺失返回 undefined。标题来自会话首个用户消息的自动生成
-   * （session-title），异步出现——bind 时可能尚无，随后由 session/event 监听补正。
+   * 会话标题读面（DSH 0.2）：`Session.events` 已移除，且同步事件读取
+   * （snapshotEvents/ownEvents）已被标记弃用——新代码不得调用。标题的权威读面
+   * 是 `ctx.sessionTitle.get(session)` 折叠后的投影快照。
+   * 服务缺失（极简 profile）时保持 undefined——标题仍由下方 session/event 监听补正。
+   */
+  let sessionTitleService:
+    | { get(session: unknown): { title?: string } | undefined }
+    | undefined
+  ctx.inject(['sessionTitle'], (scope: unknown) => {
+    sessionTitleService = (scope as { sessionTitle?: typeof sessionTitleService }).sessionTitle
+  })
+
+  /**
+   * 会话标题：取 session-title 服务折叠后的最新标题（last-wins）。
+   * 无标题返回 undefined。标题来自会话首个用户消息的自动生成（session-title），
+   * 异步出现——bind 时可能尚无，随后由 session/event 监听补正。
    */
   const sessionTitleOf = (session: unknown): string | undefined => {
-    const events = (session as { events?: unknown } | undefined)?.events
-    if (!Array.isArray(events)) return undefined
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i] as SessionEventLike | undefined
-      if (e?.type !== 'session/title') continue
-      const title = e.data?.title
-      return typeof title === 'string' && title.trim() !== '' ? title.trim() : undefined
-    }
-    return undefined
+    const title = sessionTitleService?.get(session)?.title
+    return typeof title === 'string' && title.trim() !== '' ? title.trim() : undefined
   }
 
   /** 显示名：config.label 覆盖 > 会话标题 > dsh:<项目名>-<会话短id> 兜底。 */
@@ -246,11 +252,16 @@ export function apply(ctx: Context, config: Config) {
   // 这里用宽松类型桥访问（与 state-report.ts 一致）
   const sessionOf = (agent: any): unknown => agent?.session
 
-  const offCreated = ctx.on('agent/created', (payload: any) => {
+  // DSH 0.2：agent/created 变为串行可等待的钩子，handler 必须返回
+  // `Promise<undefined> | undefined`（返回 void 会类型报错）。这里仍保持
+  // fire-and-forget：bind 内部是 herdr 网络往返，await 会拖慢 agent 创建；
+  // 显式返回 undefined 即「同步完成、不阻塞创建」，与旧行为一致。
+  const offCreated = ctx.on('agent/created', (payload: any): undefined => {
     const agentId = payload.agent.id
     void bind(agentId, sessionOf(payload.agent)).then(binding => {
       if (binding) report(agentId, 'idle', 'herdr session ready')
     })
+    return undefined
   })
 
   // agent/request（waterfall，必须 next()）→ working

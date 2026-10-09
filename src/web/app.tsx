@@ -9,6 +9,7 @@ import { startSessionListBranding } from './session-list-branding.ts'
 import { startTabController } from './tab-controller.ts'
 import { startHeroBranding, setHerdrLang } from './hero-branding.ts'
 import { SidebarButtonHost } from './global-dashboard.tsx'
+import { deriveCurrentSessionId } from '../client-logic.ts'
 
 // 宽松类型桥：slots / sessions / locale
 interface SlotsApi {
@@ -28,10 +29,14 @@ export interface ClientCtx {
   effect(fn: () => unknown): unknown
 }
 
-/** sessions 服务的最小形状（list 读面 + open 会话切换写面）。 */
+/** sessions 服务的最小形状（list 读面）。DSH 0.2 起 ISessions 不再提供会话切换写面。 */
 interface SessionsApiLike {
   list?: SessionListLike
-  open?: (id: string) => void
+}
+
+/** uiWorkspace 服务的最小形状（会话导航写面；0.2 起 openSession 归 ui-workspace）。 */
+interface UiWorkspaceLike {
+  openSession(target: string): void
 }
 
 export function apply(ctx: ClientCtx) {
@@ -40,13 +45,19 @@ export function apply(ctx: ClientCtx) {
   let stopSessionListBranding: (() => void) | null = null
   ctx.inject(['sessions'], (scope: unknown) => {
     const sessions = (scope as { sessions?: SessionsApiLike }).sessions
-    setSessionIdReader(() => sessions?.list?.getSnapshot?.()?.current)
-    if (sessions?.open) {
-      setSessionOpener(id => sessions.open!(id))
-    }
+    // DSH 0.2：SessionListState 已无 current 字段，当前（主）会话由 mainView 持有标记推导。
+    setSessionIdReader(() => deriveCurrentSessionId(sessions?.list?.getSnapshot?.()))
     if (sessions?.list) {
       stopModeTracking = startModeTracking(sessions.list)
       stopSessionListBranding = startSessionListBranding(sessions.list)
+    }
+  })
+  // 会话切换：DSH 0.2 的 ISessions 移除了 open()，导航写面改由 ui-workspace 提供；
+  // 宿主未提供该服务时 inject 不执行 → 跨会话跳转降级为 no-op，本会话定位仍可用。
+  ctx.inject(['uiWorkspace'], (scope: unknown) => {
+    const uiWorkspace = (scope as { uiWorkspace?: UiWorkspaceLike }).uiWorkspace
+    if (uiWorkspace?.openSession) {
+      setSessionOpener(id => uiWorkspace.openSession(id))
     }
   })
   // herdr Tab 打标：DOM 显隐门控 + logo 样式锚点（观察 tablist 渲染与 React 重渲染）

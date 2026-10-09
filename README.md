@@ -39,7 +39,7 @@ Restart the profile after install. Verify with `dsh plugin --profile web list`.
 dsh plugin --profile web remove dsh-plugin-herdr
 ```
 
-Restart the profile to unload tools, panel, and Herdr mode. The preset copy at `$DSH_HOME/.agent-presets/herdr/` is left behind — remove it manually if needed.
+Restart the profile to unload tools, panel, and Herdr mode. The preset is declared by this package's `cordis.patch.yml` bundle layer, so removing the plugin removes it too — nothing is left behind under `$DSH_HOME/.agent-presets/` (that directory-based mechanism was removed in DSH 0.2; a stale copy from an older install can be deleted manually).
 
 ## Development
 

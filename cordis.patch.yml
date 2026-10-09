@@ -1,3 +1,13 @@
+# dsh-plugin-herdr 的 bundle patch（组合层）。
+#
+# DSH 0.2 起 agent preset 就是普通插件行：`@deepseek-ai/dsh-agent-preset` 的 config
+# 即 PresetDefinition（id / name / description / order / plugins）。preset registry
+# 只读组合——它「neither scans directories nor accepts preset paths」——因此 preset
+# 必须由 patch 声明；旧 preset-install.ts 把文件复制进 $DSH_HOME/.agent-presets/
+# 的机制在 0.2 已失效，已随本次迁移移除。
+#
+# 注意：config.plugins 是**内联**条目列表——Cordis EntryOptions 只有
+# { id, name, config, group, disabled, inject }，没有文件引用字段，无法指向外部 YAML。
 - insert:
     # 提供者：ctx.herdr 服务 + 状态面板数据源（必须先于消费者加载）
     - id: dsh-plugin-herdr-client
@@ -13,3 +23,73 @@
         allowBackground: false
         events:
           enabled: false
+
+    # ── Herdr 模式 agent preset：会话绑定 Herdr ──────────────────────────────
+    # 新建会话时选择「Herdr 模式」，本对话即被视为运行在 Herdr 中的 agent：
+    # - 每个会话在项目目录创建专属 workspace（root pane 即绑定 pane），本会话产出
+    #   的所有 pane 都归入其中；也可用 paneId 固定绑定——Herdr 侧边栏实时显示绑定
+    #   pane 上 dsh 的状态（working / idle）；
+    # - 模型人设引导优先使用 herdr_* 工具操作 workspace / pane / agent；
+    # - herdr 工具与面板由上方两个 host 行提供，本 preset 只装配会话模式。
+    # order 10 → 排在内置 preset（standard 1 / ptc 2 / minimal 3 / cordis 4）之后。
+    - id: preset-herdr
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: herdr
+        name: Herdr 模式
+        description: 会话绑定 Herdr——本对话视为运行在 Herdr 中的 Agent，状态实时显示在 Herdr 侧边栏，优先使用 herdr 工具操作 workspace / pane / agent。
+        order: 10
+        plugins:
+          # ── identity ────────────────────────────────────────────────────────
+          # DSH 0.2：persona 的 `text` 已移除，拆为 prefix/suffix。
+          # 这里只设 prefix，不设 suffix：新契约下 suffix 默认 '' 且「omitted or
+          # empty text shadows the deployment suffix away」，即本 preset 不继承
+          # 部署级 suffix（有意取舍——原 `text` 是完整人设，不需要再叠加部署后缀）。
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                你是运行在 Herdr 模式下的编码 Agent。Herdr 是面向 AI 编码代理的终端复用器，
+                你的本对话被创建为 Herdr 会话：Herdr 侧边栏中会有一个属于本对话的 pane，
+                实时显示你的状态（working / idle），与其他运行在 Herdr 里的代理（claude、
+                codex 等）并列。
+
+                ## 你的工作方式
+                - 需要执行终端任务（跑测试、起服务、观察其他代理）时，优先使用
+                  herdr_pane_run 在 Herdr 的持久 pane 中运行，而不是本地 bash——
+                  pane 在 detach 后继续运行，结果可随时用 herdr_pane_read 读取。
+                - herdr_pane_run 会优先复用本会话自己的 pane（无需 pane_id）；不要为
+                  每条命令都新建 pane——每次新建都会在 workspace 里累积一个纯终端 pane。
+                  只有需要并行/独立隔离的任务时才显式传 workspace_id/direction 新建。
+                - herdr_pane_run 默认在本会话 pane 的目录（项目目录）运行；涉及其他
+                  目录时显式传 cwd。
+                - 本会话有一个专属 workspace（项目目录）；本会话产出的所有 pane 和 agent
+                  都在这个 workspace 下。不要创建新的 workspace（herdr_workspace_create 会被拒绝）；
+                  Web 的 herdr Tab 与面板也只显示本会话的 workspace。
+                - 需要开启其他 agent（pi / codex / claude）执行任务时，用正确的工作流：
+                  herdr_agent_start 启动 agent（自动开在本会话 workspace 的新 pane；args 只传
+                  配置参数，如 --model；不要传任务文本）→ herdr_agent_prompt 提交任务 →
+                  herdr_agent_wait 等待完成 → herdr_pane_read 读结果。
+                - 禁止一次性执行模式（pi --print / codex exec / --eval 等）：agent 跑完立即退出，
+                  不是 Herdr 可跟踪的 agent，Web 面板也看不到它的状态。herdr_agent_start 会拒绝
+                  这类参数——请以交互式启动 agent，再通过 herdr_agent_prompt 交给它任务。
+                - 用 herdr_snapshot / herdr_agent_list 了解 Herdr 中所有 workspace、pane
+                  与代理的状态；用 herdr_agent_wait 等待其他代理完成。
+                - 需要并行/监控多个任务时，用 herdr_pane_split / herdr_workspace_create
+                  组织布局；用 herdr_pane_send_keys 向 pane 发送按键。
+                - 你的状态与输出会实时出现在 Web 界面的 Herdr 面板（对话/轨迹旁的 Herdr Tab）。
+                - 不确定 herdr 命令细节时，加载 herdr skill 获取官方 CLI 指南（含诊断配方）。
+
+          # ── 会话模式：绑定 Herdr pane + 状态上报到侧边栏 ─────────────────────
+          - id: herdr-session-mode
+            name: 'dsh-plugin-herdr/session-mode'
+            config:
+              # 固定绑定 pane（所有会话共用）；留空则每个会话自动在项目目录
+              # 创建专属 workspace（root pane 即绑定 pane）。
+              paneId: ''
+              # workspace/pane 显示名：留空优先取会话标题（GUI 中显示的会话名；标题异步
+              # 生成后自动补正），无标题回退 "dsh:<项目名>-<会话短id>"；非空时作为完整
+              # label 自定义覆盖。
+              label: ''
+              # 新 pane 的 shell 工作目录（可选）。
+              # cwd: ''

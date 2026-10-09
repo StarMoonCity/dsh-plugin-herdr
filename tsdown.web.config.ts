@@ -3,6 +3,10 @@ import { defineConfig } from 'tsdown'
 // Web 客户端 bundle：浏览器平台，JSX，外部化 react / dsh client 依赖
 // （运行时由 web shell 的 ClientModuleLoader 解析，见 dsh-client-modules）。
 // banner/footer 生成 __ModuleLoader__.load 注册包装（factory 单参 require，返回 exports）。
+// external 只列 bundle 中真实存在的 bare import：react、react/jsx-runtime 与
+// dsh-client-ui-primitives（PLATFORM_MODULES 静态 UI 库，基线模块表提供）。
+// 服务（slots / locale / sessions / uiWorkspace）经 Cordis 服务图获取，不是模块边；
+// 其提供者由 package.json 的 dsh.client.inject + 服务级 inject 表达。
 const MODULE_LOADER_ID = 'dsh-plugin-herdr'
 
 export default defineConfig({
@@ -28,12 +32,7 @@ export default defineConfig({
   external: [
     'react',
     'react/jsx-runtime',
-    '@deepseek-ai/dsh-client-runtime',
-    '@deepseek-ai/dsh-client-ui-slots',
-    '@deepseek-ai/dsh-client-ui-conversation',
-    '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-ui-primitives',
-    '@deepseek-ai/cordis',
   ],
   deps: {
     alwaysBundle: ['@xterm/xterm', '@xterm/addon-fit'],

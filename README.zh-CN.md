@@ -39,7 +39,7 @@ dsh plugin --profile web add github:sunny0826/dsh-plugin-herdr
 dsh plugin --profile web remove dsh-plugin-herdr
 ```
 
-重启 profile 即可卸载工具、面板与 Herdr 模式。预设副本残留在 `$DSH_HOME/.agent-presets/herdr/`，按需手动删除。
+重启 profile 即可卸载工具、面板与 Herdr 模式。预设由本包的 `cordis.patch.yml` bundle 层声明，随插件一并移除，不会在 `$DSH_HOME/.agent-presets/` 留下副本（该目录机制在 DSH 0.2 已移除；旧版本安装残留的副本可手动删除）。
 
 ## 开发
 

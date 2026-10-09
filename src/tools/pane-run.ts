@@ -122,7 +122,8 @@ export function registerPaneRun(ctx: Context, opts: PaneRunToolOptions) {
         }
         if (args.run_in_background && opts.allowBackground) {
           const jobId = startWaitJob<RunCommandResult>(ctx, {
-            owner: exec.agent,
+            // DSH 0.2：ToolRunContext.agent 由 SessionId 变为 Agent；JobSpec.owner 仍是 SessionId。
+            owner: exec.agent?.id,
             label: `herdr run: ${args.command}`,
             wait: signal => ctx.herdr.runCommand(request, signal),
             render: result => renderRunResult(args as { command: string }, result),

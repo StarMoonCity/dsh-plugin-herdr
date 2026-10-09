@@ -77,6 +77,15 @@ function makeHarness(markedPanes: MarkedPane[] = [], wsPane: string | null = 'wN
   }
   const ctx = new Context()
   ctx.provide('herdr', herdr)
+  // sessionTitle 服务 stub（DSH 0.2 的标题读面）。
+  // 必须在 apply() 之前 provide：插件的 ctx.inject(['sessionTitle']) 回调只在
+  // 服务可用时执行；缺失时保持 undefined，标题回退到 dsh:<项目名>-<短id>。
+  ctx.provide('sessionTitle', {
+    get: (session: unknown) => {
+      const title = (session as { __title?: string } | undefined)?.__title
+      return typeof title === 'string' ? { title } : undefined
+    },
+  })
   sessionMode.apply(ctx, { paneId: '', source: 'dsh:test', label: '' })
   return { ctx, calls }
 }
@@ -392,15 +401,16 @@ test('fix: request fallback passes session cwd to workspace create', async () =>
 
 // ── 会话标题命名（fix：workspace 以 session 名称命名，而非 dsh:<项目名>-<短id>） ──
 
-/** 构造带标题的会话对象（events 中最新一条 session/title 为标题）。 */
+/**
+ * 构造带标题的会话对象。
+ * DSH 0.2：标题读面是 `ctx.sessionTitle.get(session)`，旧实现读的 `session.events`
+ * 数组已随 `Session.events` 一并移除。这里用 `__title` 测试字段供 stub 服务读取。
+ */
 function titledSession(id: string, title: string, cwd?: string): unknown {
   return {
     id,
     header: { cwd: cwd ?? '/proj/dsh-plugin' },
-    events: [
-      { type: 'user/message', seq: 0, data: {} },
-      { type: 'session/title', seq: 1, data: { title } },
-    ],
+    __title: title,
   }
 }
 
@@ -442,7 +452,7 @@ test('session-mode: session/title event after bind renames workspace and pane (a
   const { ctx, calls } = makeHarness()
   // bind 时无标题 → 回退 dsh:<项目名>-<短id>
   ctx.emit({} as any, 'agent/created', {
-    agent: { id: 'sess-A', session: { header: { cwd: '/proj/dsh-plugin' }, events: [] } },
+    agent: { id: 'sess-A', session: { header: { cwd: '/proj/dsh-plugin' } } },
   })
   await flush()
   assert.equal(calls.wsCreates[0].label, 'dsh:dsh-plugin-sess-A')
