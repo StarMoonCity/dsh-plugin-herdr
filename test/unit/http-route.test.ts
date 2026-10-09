@@ -81,12 +81,23 @@ function makeFakeHerdr(): FakeHerdr {
   }
 }
 
-async function loadPlugin(opts: { fakeHerdr?: FakeHerdr } = {}): Promise<{ routes: Route[]; dispose(): Promise<void> }> {
+/** 宿主闸门 fake：按是否有 cookie 决定放行/401（模拟 ctx.connection.requestRejection）。 */
+interface FakeGate {
+  requestRejection(req: {
+    headers: Headers | Readonly<Record<string, string | readonly string[] | undefined>>
+  }): 401 | 403 | undefined
+}
+
+async function loadPlugin(
+  opts: { fakeHerdr?: FakeHerdr; connection?: FakeGate } = {},
+): Promise<{ routes: Route[]; dispose(): Promise<void> }> {
   const ctx = new Context()
   const routes: Route[] = []
   ctx.provide('webServer', { register: (r: Route) => { routes.push(r); return () => {} } })
   ctx.provide('tools', { register: () => () => {} })
   ctx.provide('jobs', { start: () => 'herdr-1' })
+  // DSH-0.1.2-A1-08：宿主 Connection 闸门（可选提供；不提供即验证优雅降级）
+  if (opts.connection) ctx.provide('connection', opts.connection)
   let clientFiber: { dispose(): Promise<void> } | null = null
   if (opts.fakeHerdr) {
     // 注入 fake herdr，isolated 测试路由逻辑；跳过真实 client-entry（避免 spawn CLI）
@@ -723,4 +734,103 @@ test('regression: terminal routes must not break core routes with this-dependent
     assert.ok(paths.some(p => p.startsWith('/herdr-terminal-session/')), 'terminal routes must register')
     assert.ok(paths.includes('/herdr-dashboard'), '/herdr-dashboard must register')
   } finally { await fiber.dispose(); await clientFiber.dispose() }
+})
+
+// ── DSH-0.1.2-A1-08：路由并入宿主 Connection 闸门 ───────────────────────────
+
+const cookieGate: FakeGate = {
+  requestRejection: req => {
+    const headers = req.headers as Readonly<Record<string, string | readonly string[] | undefined>>
+    return headers.cookie ? undefined : 401
+  },
+}
+
+test('A1-08: unauthenticated request is refused with 401 before any handling', async () => {
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr(), connection: cookieGate })
+  try {
+    for (const path of ['/herdr-status', '/herdr-dashboard', '/herdr-topology']) {
+      const route = routes.find(r => r.path === path)
+      assert.ok(route, `${path} registered`)
+      const res = await invoke(route!.handler, { method: 'GET', headers: LOCAL })
+      assert.equal(res.status, 401, `${path} must require browser authentication`)
+    }
+  } finally {
+    await dispose()
+  }
+})
+
+test('A1-08: authenticated request behaves exactly as before', async () => {
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr(), connection: cookieGate })
+  try {
+    const route = routes.find(r => r.path === '/herdr-status')
+    const res = await invoke(route!.handler, {
+      method: 'GET',
+      headers: { ...LOCAL, cookie: 'dsh-auth-9-x=v1.payload' },
+    })
+    assert.equal(res.status, 200)
+    assert.ok(res.body && typeof res.body === 'object')
+  } finally {
+    await dispose()
+  }
+})
+
+test('A1-08: authentication precedes method dispatch (no cookie + wrong method -> 401, not 405)', async () => {
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr(), connection: cookieGate })
+  try {
+    const route = routes.find(r => r.path === '/herdr-status')
+    // 未认证：不得到达方法分派
+    const anon = await invoke(route!.handler, { method: 'POST', headers: LOCAL })
+    assert.equal(anon.status, 401)
+    assert.equal(anon.headers.allow, undefined, 'must not advertise Allow before authenticating')
+    // 已认证：方法校验照旧生效
+    const auth = await invoke(route!.handler, {
+      method: 'POST',
+      headers: { ...LOCAL, cookie: 'dsh-auth-9-x=v1.payload' },
+    })
+    assert.equal(auth.status, 405)
+    assert.equal(auth.headers.allow, 'GET')
+  } finally {
+    await dispose()
+  }
+})
+
+test('A1-08: a 403 from the gate is honoured and the handler never runs', async () => {
+  // 用写路由的可观测副作用证明「闸门拒绝后 handler 体从未执行」：
+  // /herdr-rename 命中后会调用 ctx.herdr.workspaceRename；tracker 不会。
+  let renamed = false
+  const gate: FakeGate = { requestRejection: () => 403 }
+  const { routes, dispose } = await loadPlugin({
+    fakeHerdr: {
+      ...makeFakeHerdr(),
+      workspaceRename: async () => { renamed = true },
+    },
+    connection: gate,
+  })
+  try {
+    const route = routes.find(r => r.path === '/herdr-rename')
+    assert.ok(route, '/herdr-rename registered')
+    const res = await invoke(route!.handler, {
+      method: 'POST',
+      headers: LOCAL,
+      body: { kind: 'workspace', id: 'w1', label: 'renamed' },
+    })
+    assert.equal(res.status, 403)
+    assert.equal(renamed, false, 'gate rejection must stop processing before the handler body')
+  } finally {
+    await dispose()
+  }
+})
+
+test('A1-08: without a connection service the routes still register and keep the local guard (graceful degradation)', async () => {
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-status')
+    assert.ok(route, 'routes must still register when the host gate is absent')
+    const ok = await invoke(route!.handler, { method: 'GET', headers: LOCAL })
+    assert.equal(ok.status, 200)
+    const bad = await invoke(route!.handler, { method: 'GET', headers: { host: 'evil.example' } })
+    assert.equal(bad.status, 403, 'local guard still applies')
+  } finally {
+    await dispose()
+  }
 })

@@ -1,7 +1,7 @@
 // CA-007：HTTP 控制面守卫单测（可信本地上下文 + 严格方法）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { guardLocalRequest, hostnameOfHost, requireMethod } from '../../src/http-guard.ts'
+import { guardHostGate, guardLocalRequest, hostnameOfHost, requireMethod } from '../../src/http-guard.ts'
 
 const localReq = (headers: Record<string, string | undefined>) => ({ method: 'GET', headers })
 
@@ -85,4 +85,56 @@ test('requireMethod: match passes; missing method defaults to GET', () => {
   assert.equal(requireMethod({ method: 'GET' }, 'GET').ok, true)
   assert.equal(requireMethod({ method: 'post' }, 'POST').ok, true, 'case-insensitive')
   assert.equal(requireMethod({}, 'GET').ok, true, 'no method defaults GET')
+})
+
+// ── DSH-0.1.2-A1-08：宿主 Connection 闸门并入 ────────────────────────────────
+
+test('guardHostGate: no gate (headless/minimal profile) -> undefined, lets the request through', () => {
+  assert.equal(guardHostGate(undefined, localReq({ host: 'localhost' })), undefined)
+})
+
+test('guardHostGate: gate admits -> undefined', () => {
+  const gate = { requestRejection: () => undefined }
+  assert.equal(guardHostGate(gate, localReq({ host: 'localhost' })), undefined)
+})
+
+test('guardHostGate: missing/bad cookie -> 401', () => {
+  const gate = { requestRejection: () => 401 as const }
+  const g = guardHostGate(gate, localReq({ host: 'localhost' }))
+  assert.ok(g, 'must reject')
+  assert.equal(g.status, 401)
+  assert.match(g.message, /authentication required/)
+})
+
+test('guardHostGate: untrusted Host/Origin -> 403', () => {
+  const gate = { requestRejection: () => 403 as const }
+  const g = guardHostGate(gate, localReq({ host: 'localhost' }))
+  assert.ok(g, 'must reject')
+  assert.equal(g.status, 403)
+  assert.match(g.message, /Connection trust gate/)
+})
+
+test('guardHostGate: forwards the request headers verbatim to the gate', () => {
+  let seen: unknown
+  const gate = {
+    requestRejection: (req: { headers: unknown }) => {
+      seen = req.headers
+      return undefined
+    },
+  }
+  const headers = { host: 'localhost:3080', cookie: 'dsh-auth-x=v1.y' }
+  guardHostGate(gate, { method: 'GET', headers })
+  assert.deepEqual(seen, headers)
+})
+
+test('guardHostGate: rejects an unauthenticated wrong-method request before any method dispatch', () => {
+  // 认证先于方法分派：DELETE + 无 cookie → 401（而不是插件的 405）。
+  const gate = {
+    requestRejection: (req: { headers: Readonly<Record<string, string | readonly string[] | undefined>> }) =>
+      req.headers.cookie ? undefined : (401 as const),
+  }
+  assert.equal(guardLocalRequest({ method: 'DELETE', headers: { host: 'localhost' } }).ok, true, 'precondition: local guard alone would pass')
+  const g = guardHostGate(gate, { method: 'DELETE', headers: { host: 'localhost' } })
+  assert.equal(g?.status, 401)
+  assert.equal(guardHostGate(gate, { method: 'DELETE', headers: { host: 'localhost', cookie: 'ok' } }), undefined)
 })

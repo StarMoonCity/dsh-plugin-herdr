@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Config, type Config as ConfigType, resolveSession, resolveSocketPath } from './config.ts'
-import { guardLocalRequest, requireMethod } from './http-guard.ts'
+import { guardHostGate, guardLocalRequest, requireMethod, type HostConnectionGate } from './http-guard.ts'
 import { createLogger } from './log.ts'
 import { setupEventForwarding } from './events/forward.ts'
 import { setupStateReporting } from './events/state-report.ts'
@@ -157,10 +157,18 @@ export function apply(ctx: Context, config: ConfigType) {
     }
     return (await terminalCapabilityInflight).available
   }
+  // DSH-0.1.2-A1-08：宿主 Connection 闸门（Host/Origin + 浏览器认证）。
+  // 用独立的可选 inject 捕获：connection 缺失（headless/极简 profile）时路由仍注册，
+  // 只是退化为仅插件自身的可信本地上下文守卫；若与 webServer 并列 inject，
+  // 缺 connection 会导致整块路由都不注册——那是倒退。
+  let hostGate: HostConnectionGate | undefined
+  ctx.inject(['connection'], injected => {
+    hostGate = (injected as unknown as { connection?: HostConnectionGate }).connection
+  })
   ctx.inject(['webServer'], injected => {
     const webServer = (injected as unknown as { webServer: { register(r: unknown): () => void } }).webServer
     type Res = { writeHead(code: number, headers: Record<string, string>): void; end(body?: string): void }
-    // CA-007：控制面守卫 —— 严格方法 + Host allowlist + Origin/Sec-Fetch-Site 同源
+    // CA-007 + A1-08：两层控制面守卫 —— 宿主闸门（认证）→ 方法 → 本地上下文
     type Req = { method?: string; url?: string; headers?: Record<string, string | string[] | undefined> }
     const reject = (res: Res, status: number, message: string, extraHeaders: Record<string, string> = {}) => {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...extraHeaders })
@@ -168,6 +176,12 @@ export function apply(ctx: Context, config: ConfigType) {
     }
     const guard = (res: Res, req: unknown, allowed: string): boolean => {
       const r = req as Req
+      // 第一层：宿主闸门（认证先于一切处理，未认证不得进入方法分派或副作用）
+      const gate = guardHostGate(hostGate, r)
+      if (gate) {
+        reject(res, gate.status, gate.message)
+        return false
+      }
       const m = requireMethod(r, allowed)
       if (!m.ok) {
         reject(res, m.status, m.message, { allow: allowed.toUpperCase() })

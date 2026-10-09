@@ -1,17 +1,20 @@
 /**
- * CA-007：HTTP 控制面（/herdr-status、/herdr-session-pane、/herdr-start）的
- * 可信本地上下文守卫。
+ * CA-007 + DSH-0.1.2-A1-08：HTTP 控制面的双层守卫。
  *
- * 威胁模型：DSH web server 绑定 localhost，任何可访问该端口的进程/浏览器页面
- * 都能打控制面。本守卫把请求限定为"可信本地上下文"：
+ * 第一层——宿主 Connection 闸门（guardHostGate）：调用
+ * `ctx.connection.requestRejection()`，即宿主对 /api 同一套
+ * 「Host/Origin 检查 + 浏览器认证（cookie）」。原始 webServer 路由不会自动
+ * 继承这层保护，必须显式并入（见 skills/plugin-upgrade 的 A1-08）。
+ *
+ * 第二层——可信本地上下文守卫（guardLocalRequest + requireMethod）：
  * - 严格方法校验（requireMethod，405 + Allow）；
  * - Host allowlist（仅 localhost/127.0.0.1/::1）——抵御 DNS rebinding（外部域名
  *   解析到 127.0.0.1 时 Host 不是本地名，直接拒绝）；
  * - Origin 同源校验（有 Origin 时必须与 Host 一致）——跨站浏览器请求（CSRF）拒绝；
  * - Sec-Fetch-Site: cross-site 拒绝——现代浏览器兜底（含无 Origin 的 <img> GET）。
  *
- * 无 Origin/Sec-Fetch-Site 的请求（curl、本机工具、同源 GET）放行——本机进程
- * 本就拥有该用户权限，属于可信本地上下文。
+ * 两层都放行才进入 handler。宿主闸门缺失时（headless / 极简 profile 未提供
+ * connection 服务）退化为仅第二层，路由仍可用——不因缺服务而整体不注册。
  */
 
 /** Node IncomingMessage 的最小子集（webServer handler 入参）。 */
@@ -26,6 +29,42 @@ export interface GuardResult {
   /** 拒绝时的 HTTP 状态码（400/403/405）。 */
   status: number
   message: string
+}
+
+/**
+ * 宿主 Connection 闸门的最小形状——`@deepseek-ai/dsh-client-connection` 的
+ * `HostConnectionHandle.requestRejection` 子集（结构化匹配，不引入运行时依赖）。
+ */
+export interface HostConnectionGate {
+  /**
+   * 应用 Connection 的 Host/Origin 检查与浏览器认证。
+   * @returns 401（未认证）/ 403（不受信来源）表示拒绝；undefined 表示放行。
+   */
+  requestRejection(request: {
+    headers: Headers | Readonly<Record<string, string | readonly string[] | undefined>>
+  }): 401 | 403 | undefined
+}
+
+/**
+ * 宿主闸门校验。返回拒绝结果；`undefined` 表示放行（含闸门缺失）。
+ * @param gate - ctx.connection；缺失时视为无此层。
+ * @param req - 待校验请求（只需 headers）。
+ */
+export function guardHostGate(
+  gate: HostConnectionGate | undefined,
+  req: GuardedRequest,
+): GuardResult | undefined {
+  if (!gate) return undefined
+  const rejection = gate.requestRejection({ headers: req.headers ?? {} })
+  if (rejection === undefined) return undefined
+  return {
+    ok: false,
+    status: rejection,
+    message:
+      rejection === 401
+        ? 'browser authentication required (missing or invalid session cookie)'
+        : 'request rejected by the host Connection trust gate (Host/Origin)',
+  }
 }
 
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
