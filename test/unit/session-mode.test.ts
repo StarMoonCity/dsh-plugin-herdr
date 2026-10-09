@@ -487,3 +487,47 @@ test('session-mode: reuse of a marked pane corrects the label when the title is 
   assert.deepEqual(calls.renames, [{ pane_id: 'w9:p2', label: '开启一个 pi Agent 检查当前系统' }], '复用 pane 补正 pane 显示名')
   void ctx.fiber.dispose()
 })
+// ── DSH 0.2：agent/created 的创建期 signal ─────────────────────────────────
+
+test('DSH-0.2: an already-aborted agent/created signal produces no side effects', async () => {
+  const registry = getBindingRegistry()
+  const { ctx, calls } = makeHarness()
+  const ac = new AbortController()
+  ac.abort()
+  ctx.emit({} as any, 'agent/created', { agent: { id: 'sess-abort' }, signal: ac.signal })
+  await flush()
+  assert.equal(calls.wsCreates.length, 0, 'no workspace for a cancelled creation')
+  assert.equal(registry.has('sess-abort'), false, 'no registry entry for a cancelled creation')
+  assert.equal(calls.reports.length, 0, 'no idle report for a cancelled creation')
+  void ctx.fiber.dispose()
+})
+
+test('DSH-0.2: abort during an in-flight bind reclaims the workspace and registers nothing', async () => {
+  const registry = getBindingRegistry()
+  const { ctx, calls } = makeSlowHarness()
+  const ac = new AbortController()
+  // snapshot 80ms 在途；监听器在首个 await 之前已挂上，故同步 abort 能命中
+  ctx.emit({} as any, 'agent/created', { agent: { id: 'sess-abort2' }, signal: ac.signal })
+  ac.abort()
+  await new Promise(r => setTimeout(r, 200))
+  assert.equal(calls.wsCreates.length, 1, 'bind still ran to create the workspace')
+  assert.deepEqual(calls.wsCloses, ['wN'], 'workspace created mid-race must be reclaimed')
+  assert.equal(registry.has('sess-abort2'), false, 'no registry entry for a cancelled creation')
+  assert.equal(calls.reports.length, 0, 'no idle report for a cancelled creation')
+  void ctx.fiber.dispose()
+})
+
+test('DSH-0.2: a bind that outlives its signal does not leak the abort listener', async () => {
+  const registry = getBindingRegistry()
+  const { ctx, calls } = makeSlowHarness()
+  const ac = new AbortController()
+  ctx.emit({} as any, 'agent/created', { agent: { id: 'sess-ok' }, signal: ac.signal })
+  await new Promise(r => setTimeout(r, 200))
+  assert.equal(registry.has('sess-ok'), true, 'normal bind registers')
+  // bind 结束后再 abort：不得回收已建立的绑定（finally 已退订）
+  ac.abort()
+  await flush()
+  assert.equal(registry.has('sess-ok'), true, 'a late abort must not tear down a settled bind')
+  assert.deepEqual(calls.wsCloses, [], 'nothing to reclaim')
+  void ctx.fiber.dispose()
+})

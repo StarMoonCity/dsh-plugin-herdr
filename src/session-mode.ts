@@ -172,10 +172,17 @@ export function apply(ctx: Context, config: Config) {
    *   后 registry 内存清空、并发重复 created 的场景），避免同一个会话累积多个 pane；
    *   复用时若会话标题已可用则补正 workspace/pane 显示名。
    */
-  const bind = async (agentId: string, session?: unknown): Promise<Binding | null> => {
+  const bind = async (
+    agentId: string,
+    session?: unknown,
+    signal?: AbortSignal,
+  ): Promise<Binding | null> => {
     if (bindings.has(agentId)) return bindings.get(agentId)!
     // 防重入：在途 bind 直接返回（并发重复 created / 兜底 bind 不重复创建 pane）
     if (pending.has(agentId)) return null
+    // DSH 0.2：agent/created 携带创建期 signal；创建已取消时不得产生任何副作用
+    // （不建 workspace、不写 registry、不写 tokens）。
+    if (signal?.aborted) return null
     const fixed = (config.paneId ?? '').trim()
     if (fixed) {
       const b: Binding = { paneId: fixed, created: false }
@@ -184,6 +191,11 @@ export function apply(ctx: Context, config: Config) {
       return b
     }
     pending.add(agentId)
+    // 创建期取消 → 复用既有的 disposedAgents 清理路径：bind 完成时若已取消，
+    // 则不注册并回收刚建的 pane/workspace（与 agent/disposed 在途同一语义）。
+    // bind 自身的网络调用不接受 signal，故此处只把取消转成该标记。
+    const onAbort = () => disposedAgents.add(agentId)
+    signal?.addEventListener('abort', onAbort, { once: true })
     let created: Binding | null = null
     try {
       const snap = await ctx.herdr.snapshot()
@@ -241,6 +253,8 @@ export function apply(ctx: Context, config: Config) {
       logger.warn('pane bind failed for agent %s: %s', agentId, errText(err))
       return null
     } finally {
+      // 退订创建期取消监听：本次 bind 已消费该意图（无论成功/失败/取消）
+      signal?.removeEventListener('abort', onAbort)
       pending.delete(agentId)
       // codex review P2：bind 失败/未创建时若 dispose 在途，其意图已由本次 bind 消费，
       // 一并清除标记（竞态分支成功路径已在上面删除，这里兜底失败路径）
@@ -253,12 +267,14 @@ export function apply(ctx: Context, config: Config) {
   const sessionOf = (agent: any): unknown => agent?.session
 
   // DSH 0.2：agent/created 变为串行可等待的钩子，handler 必须返回
-  // `Promise<undefined> | undefined`（返回 void 会类型报错）。这里仍保持
-  // fire-and-forget：bind 内部是 herdr 网络往返，await 会拖慢 agent 创建；
-  // 显式返回 undefined 即「同步完成、不阻塞创建」，与旧行为一致。
+  // `Promise<undefined> | undefined`（返回 void 会类型报错），并携带
+  // source 与创建期 signal。这里仍保持 fire-and-forget：bind 内部是 herdr
+  // 网络往返，await 会拖慢 agent 创建；显式返回 undefined 即「同步完成、
+  // 不阻塞创建」，与旧行为一致。signal 则透传给 bind，使创建期取消能让
+  // 在途 bind 不做副作用（见 bind 的 onAbort 桥接）。
   const offCreated = ctx.on('agent/created', (payload: any): undefined => {
     const agentId = payload.agent.id
-    void bind(agentId, sessionOf(payload.agent)).then(binding => {
+    void bind(agentId, sessionOf(payload.agent), payload.signal).then(binding => {
       if (binding) report(agentId, 'idle', 'herdr session ready')
     })
     return undefined
