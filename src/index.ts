@@ -7,7 +7,7 @@ import { setupStateReporting } from './events/state-report.ts'
 import { HerdrStatusTracker, OUTPUT_CAP, startHerdrServer } from './status.ts'
 import { HerdrDashboardTracker } from './dashboard.ts'
 import { truncateAnsiTail } from './terminal-ansi.ts'
-import { getBindingRegistry, getBoundPaneIds, getBoundWorkspaceIds, sessionIdFromTokens } from './binding-registry.ts'
+import { getBindingRegistry, getBoundPaneIds, getBoundWorkspaceIds, getReleaseRegistry, sessionIdFromTokens } from './binding-registry.ts'
 import { registerHerdrSkill } from './skill.ts'
 import { registerSnapshot } from './tools/snapshot.ts'
 import { registerAgentList } from './tools/agent-list.ts'
@@ -117,6 +117,7 @@ export function apply(ctx: Context, config: ConfigType) {
   let offPaneSessionRoute: (() => void) | null = null
   let offStartRoute: (() => void) | null = null
   let offCloseRoute: (() => void) | null = null
+  let offWorkspaceReleaseRoute: (() => void) | null = null
   let offRenameRoute: (() => void) | null = null
   let offPaneInputRoute: (() => void) | null = null
   let offTerminalBootstrapRoute: (() => void) | null = null
@@ -464,6 +465,49 @@ export function apply(ctx: Context, config: ConfigType) {
           if (body.kind === 'pane') await ctx.herdr.paneClose(body.id)
           else await ctx.herdr.workspaceClose(body.id)
           res.end(JSON.stringify({ ok: true }))
+        } catch (e) {
+          res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }))
+        }
+      },
+    })
+    // 释放路由：POST /herdr-workspace-release（面板「关闭工作区」）
+    //
+    // 为什么不复用 /herdr-close：那条路由**故意**拒绝关闭本会话自己的 pane/workspace
+    // （"cannot close the workspace hosting this session"），是一条安全不变量。
+    // 本路由是它的自作用域补充：只释放「请求方自己那个会话」的绑定——不接受
+    // workspace_id，只接受 agent（会话 id），因此无法用来关别人的 workspace。
+    // 关闭失败/无绑定都报明确错误，不做静默成功。
+    offWorkspaceReleaseRoute = webServer.register({
+      kind: 'exact',
+      path: '/herdr-workspace-release',
+      handler: async (req: unknown, res: Res) => {
+        if (!guard(res, req, 'POST')) return
+        let body: { agent?: string }
+        try {
+          const parsed = (await readJsonBody(req)) as Record<string, unknown>
+          body = { agent: typeof parsed.agent === 'string' ? parsed.agent : undefined }
+        } catch {
+          reject(res, 400, 'invalid JSON body')
+          return
+        }
+        if (!body.agent || body.agent.trim() === '') {
+          reject(res, 400, 'agent must be a non-empty string')
+          return
+        }
+        const release = getReleaseRegistry().release
+        if (!release) {
+          // session-mode 未挂载（非 herdr preset 组合）——无从释放
+          reject(res, 503, 'binding release is unavailable (session-mode plugin is not loaded)')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        try {
+          const outcome = await release(body.agent)
+          if (!outcome) {
+            reject(res, 400, 'no herdr workspace is bound to this session')
+            return
+          }
+          res.end(JSON.stringify({ ok: true, ...outcome }))
         } catch (e) {
           res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }))
         }
@@ -865,6 +909,7 @@ export function apply(ctx: Context, config: ConfigType) {
       offPaneSessionRoute?.()
       offStartRoute?.()
       offCloseRoute?.()
+      offWorkspaceReleaseRoute?.()
       offRenameRoute?.()
       offPaneInputRoute?.()
       offTerminalBootstrapRoute?.()

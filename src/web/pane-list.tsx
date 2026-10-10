@@ -16,6 +16,8 @@ import {
 import { t, useHerdrLang } from './i18n.ts'
 import { useFloatingDrag, SNAP } from './floating-drag.ts'
 import { HERDR_LOGO_PATH_D } from './logo-path.ts'
+import { getSessionId } from './navigation.ts'
+import { ConfirmDialog } from './confirm-dialog.tsx'
 import { useHerdrMode } from './mode.ts'
 import { selfPaneStore, useSelfPaneId } from './self-pane-store.ts'
 import { useHerdrStatus, useGlobalDashboardOpen } from './store.ts'
@@ -50,7 +52,7 @@ export function HerdrPaneList() {
   void useHerdrLang()
   const herdrMode = useHerdrMode()
   const gdOpen = useGlobalDashboardOpen()
-  const { snap, error } = useHerdrStatus()
+  const { snap, error, refresh } = useHerdrStatus()
   const [collapsed, setCollapsed] = useState(false)
   const [collapsedWs, setCollapsedWs] = useState<Set<string>>(new Set())
   const selfPaneIdRaw = useSelfPaneId()
@@ -68,6 +70,10 @@ export function HerdrPaneList() {
   const preViewerPosRef = useRef<{ x: number; y: number } | null>(null)
   // 位置 state：面板与折叠圆钮共享（折叠/展开不丢失位置）
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
+  // 「关闭工作区」：受控确认 + 提交中禁用 + 失败提示
+  const [releaseOpen, setReleaseOpen] = useState(false)
+  const [releaseBusy, setReleaseBusy] = useState(false)
+  const [releaseErr, setReleaseErr] = useState<string | null>(null)
   const { handlers: dragHandlers } = useFloatingDrag<HTMLDivElement>(panelRef, pos, setPos, true)
   const minDrag = useFloatingDrag<HTMLButtonElement>(minRef, pos, setPos, true)
 
@@ -221,6 +227,39 @@ export function HerdrPaneList() {
     setCollapsedWs(prev => toggleCollapse(prev, id))
   }
 
+  /**
+   * 关闭本会话的专属工作区（自作用域）。
+   * 只发本会话自己的 session id，服务端据此释放绑定并关掉 workspace——
+   * 既有的 /herdr-close 故意拒绝关本会话自己的 workspace，这里是它的补充路径。
+   */
+  const releaseWorkspace = async (): Promise<void> => {
+    const agent = getSessionId()
+    if (!agent) {
+      setReleaseOpen(false)
+      setReleaseErr(t('panel.releaseFailed', { error: 'no session id' }))
+      return
+    }
+    setReleaseBusy(true)
+    try {
+      const resp = await fetch('/herdr-workspace-release', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent }),
+      })
+      const body = (await resp.json()) as { ok?: boolean; error?: string }
+      if (!body.ok) throw new Error(body.error ?? `herdr-workspace-release HTTP ${resp.status}`)
+      setReleaseErr(null)
+      setReleaseOpen(false)
+      // 绑定的 pane 已随工作区关闭 → 自视图/预览一并退出，再刷新状态
+      setViewingPaneId(null)
+      refresh()
+    } catch (e) {
+      setReleaseErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setReleaseBusy(false)
+    }
+  }
+
   useEffect(() => {
     if (!viewingPaneId) return
     if (!snap?.topology) return
@@ -278,6 +317,22 @@ export function HerdrPaneList() {
       <div className="pane-list-head" {...dragHandlers}>
         <span className="pane-list-title">herdr</span>
         <span className="pane-list-meta">{t('view.listMeta', { workspaces: wsCount, panes: paneCount })}</span>
+        {/* 关闭工作区：仅在本会话确有专属工作区（存在绑定 pane）时出现 */}
+        {selfPaneId ? (
+          <button
+            type="button"
+            className="pane-list-release"
+            title={t('panel.releaseWorkspaceTitle')}
+            onPointerDown={e => e.stopPropagation()}
+            onClick={e => {
+              e.stopPropagation()
+              setReleaseErr(null)
+              setReleaseOpen(true)
+            }}
+          >
+            {t('panel.releaseWorkspace')}
+          </button>
+        ) : null}
         <button
           className="pane-list-logo"
           title={t('panel.collapseToLogo')}
@@ -291,6 +346,24 @@ export function HerdrPaneList() {
         </button>
       </div>
       {error ? <div className="herdr-pane-list-error">{t('view.statusError', { error })}</div> : null}
+      {releaseErr ? (
+        <div className="herdr-pane-list-error">{t('panel.releaseFailed', { error: releaseErr })}</div>
+      ) : null}
+      <ConfirmDialog
+        visible={releaseOpen}
+        busy={releaseBusy}
+        title={
+          <>
+            <div>{t('panel.releaseConfirmTitle')}</div>
+            <div className="herdr-modal-detail">{t('panel.releaseConfirmDetail')}</div>
+          </>
+        }
+        confirmLabel={t('panel.releaseConfirm')}
+        onConfirm={() => void releaseWorkspace()}
+        onCancel={() => {
+          if (!releaseBusy) setReleaseOpen(false)
+        }}
+      />
       {viewingPaneId ? (() => {
         const viewerStatus = viewingAgent?.status ?? viewingPane?.agent_status
         const viewerDisplayState = paneDisplayState(viewerStatus)

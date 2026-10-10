@@ -4,8 +4,11 @@ import type { PaneReportState } from './client/index.ts'
 import {
   displayLabel,
   getBindingRegistry,
+  getReleaseRegistry,
   sessionIdFromTokens,
   sessionToken,
+  type ReleaseBinding,
+  type ReleaseOutcome,
 } from './binding-registry.ts'
 import { createLogger, createRateLimiter, errText } from './log.ts'
 // 加载 dsh-agent 对 Cordis Events 的声明合并（agent/created、agent/disposed、
@@ -335,6 +338,45 @@ export function apply(ctx: Context, config: Config) {
 
   logger.info('session-mode active (herdr preset standing scope)')
 
+  /**
+   * 释放本会话的绑定（面板「关闭工作区」按钮的服务端实现，经共享槽暴露给消费者插件）。
+   *
+   * 与 cleanupPane 的区别：cleanupPane 是 dispose 路径（best-effort、只回收资源、不回话）；
+   * 这里要先统计 pane 数、关掉专属 workspace、再从 bindings 与 registry 两张表里摘除绑定，
+   * 并把结果回传给调用方——否则面板关掉工作区后自认为仍有 pane（悬空绑定）。
+   * 固定绑定（config.paneId）不关 pane：那是多会话共享的资源，只释放 authority。
+   *
+   * @returns 释放结果；该 agent 无绑定时 null。
+   */
+  const releaseImpl: ReleaseBinding = async (agentId: string): Promise<ReleaseOutcome | null> => {
+    const binding = bindings.get(agentId)
+    if (!binding) return null
+    // 先摘状态再动手：关闭期间到达的 agent 事件不应把绑定写回
+    bindings.delete(agentId)
+    registry.delete(agentId)
+    if (!binding.created) {
+      await ctx.herdr.clearAgentAuthority({ pane_id: binding.paneId, source, agent: agentName }).catch(() => {})
+      logger.info('released fixed-pane authority for agent %s (pane %s)', agentId, binding.paneId)
+      return { released: 'authority' }
+    }
+    let panesClosed = 0
+    try {
+      const snap = await ctx.herdr.snapshot()
+      panesClosed = (snap.panes ?? []).filter(p => p.workspace_id === binding.workspaceId).length
+    } catch {
+      // 快照失败不阻塞关闭（panes_closed 记 0）
+    }
+    if (binding.workspaceId) {
+      await ctx.herdr.workspaceClose(binding.workspaceId).catch(() => {})
+      logger.info('released workspace %s for agent %s (%d panes)', binding.workspaceId, agentId, panesClosed)
+      return { released: 'workspace', workspace_id: binding.workspaceId, panes_closed: panesClosed }
+    }
+    await ctx.herdr.paneClose(binding.paneId).catch(() => {})
+    logger.info('released pane %s for agent %s', binding.paneId, agentId)
+    return { released: 'workspace', panes_closed: panesClosed }
+  }
+  getReleaseRegistry().release = releaseImpl
+
   ctx.effect(() => {
     return () => {
       offCreated()
@@ -350,6 +392,9 @@ export function apply(ctx: Context, config: Config) {
       pending.clear()
       disposedAgents.clear()
       turnStopped.clear()
+      // 同一防误删原则：只注销本实例装的释放钩子
+      const slot = getReleaseRegistry()
+      if (slot.release === releaseImpl) delete slot.release
     }
   })
 }

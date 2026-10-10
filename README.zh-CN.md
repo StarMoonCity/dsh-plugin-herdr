@@ -11,6 +11,7 @@
 - **控制面** — 通过 Herdr Unix-domain socket 提供 19 个 `herdr_*` 工具（snapshot、agents、panes、workspaces、layout、notifications）
 - **会话级 UI** — Herdr Tab 与侧边面板仅展示当前会话的 workspace；非 Herdr 模式下自动隐藏
 - **Herdr 模式** — 以 Herdr 模式创建会话，自动获得与会话同生命周期的专属 workspace
+- **关闭工作区** — 面板上的「关闭工作区」按钮可按需拆掉该 workspace 并解绑会话（先确认；会关闭其中所有窗格，包括本对话自己那张）。会话的 agent 被 dispose 时，宿主也会自动回收该 workspace。
 
 ## 安装
 

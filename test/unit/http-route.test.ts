@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../../src/index.ts'
 import { apply as applyClient } from '../../src/client-entry.ts'
-import { getBindingRegistry } from '../../src/binding-registry.ts'
+import { getBindingRegistry, getReleaseRegistry, type ReleaseOutcome } from '../../src/binding-registry.ts'
 import type { Config as ConfigType } from '../../src/config.ts'
 
 const CONFIG: ConfigType = {
@@ -831,6 +831,154 @@ test('A1-08: without a connection service the routes still register and keep the
     const bad = await invoke(route!.handler, { method: 'GET', headers: { host: 'evil.example' } })
     assert.equal(bad.status, 403, 'local guard still applies')
   } finally {
+    await dispose()
+  }
+})
+
+// ── /herdr-workspace-release：自作用域的「关闭工作区」 ──────────────────────
+
+/** 装一个假的释放钩子（模拟 session-mode 已挂载），返回清理函数。 */
+function withReleaseHook(fn: (agent: string) => Promise<ReleaseOutcome | null>): () => void {
+  const slot = getReleaseRegistry()
+  const prev = slot.release
+  slot.release = fn
+  return () => {
+    if (prev) slot.release = prev
+    else delete slot.release
+  }
+}
+
+test('release: self-scoped — closes the binding for the given agent and reports the outcome', async () => {
+  const seen: string[] = []
+  const restore = withReleaseHook(async agent => {
+    seen.push(agent)
+    return { released: 'workspace', workspace_id: 'wN', panes_closed: 3 }
+  })
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    assert.ok(route, '/herdr-workspace-release registered')
+    const res = await invoke(route!.handler, { method: 'POST', headers: LOCAL, body: { agent: 'sess-A' } })
+    assert.equal(res.status, 200)
+    assert.deepEqual(seen, ['sess-A'], 'release called with the caller-supplied session id')
+    assert.equal(res.body?.ok, true)
+    assert.equal(res.body?.released, 'workspace')
+    assert.equal(res.body?.workspace_id, 'wN')
+    assert.equal(res.body?.panes_closed, 3)
+  } finally {
+    restore()
+    await dispose()
+  }
+})
+
+test('release: fixed-pane bindings report authority-only release', async () => {
+  const restore = withReleaseHook(async () => ({ released: 'authority' }))
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    const res = await invoke(route!.handler, { method: 'POST', headers: LOCAL, body: { agent: 'sess-A' } })
+    assert.equal(res.status, 200)
+    assert.equal(res.body?.released, 'authority')
+  } finally {
+    restore()
+    await dispose()
+  }
+})
+
+test('release: unknown agent (no binding) -> 400, never a silent ok', async () => {
+  const restore = withReleaseHook(async () => null)
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    const res = await invoke(route!.handler, { method: 'POST', headers: LOCAL, body: { agent: 'nobody' } })
+    assert.equal(res.status, 400)
+    assert.match(String(res.body?.error), /no herdr workspace is bound/)
+  } finally {
+    restore()
+    await dispose()
+  }
+})
+
+test('release: 503 when session-mode is not loaded (no release hook)', async () => {
+  const slot = getReleaseRegistry()
+  const prev = slot.release
+  delete slot.release
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    const res = await invoke(route!.handler, { method: 'POST', headers: LOCAL, body: { agent: 'sess-A' } })
+    assert.equal(res.status, 503)
+    assert.match(String(res.body?.error), /release is unavailable/)
+  } finally {
+    if (prev) slot.release = prev
+    await dispose()
+  }
+})
+
+test('release: missing/blank agent -> 400', async () => {
+  const restore = withReleaseHook(async () => ({ released: 'workspace' }))
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    for (const body of [{}, { agent: '' }, { agent: '   ' }]) {
+      const res = await invoke(route!.handler, { method: 'POST', headers: LOCAL, body })
+      assert.equal(res.status, 400, `body ${JSON.stringify(body)} must be refused`)
+    }
+  } finally {
+    restore()
+    await dispose()
+  }
+})
+
+test('release: takes no workspace_id — an arbitrary id cannot be passed to close someone else’s workspace', async () => {
+  // 路由只接受 agent；body 里的 workspace_id 被忽略，关闭目标永远来自绑定表
+  const seen: unknown[] = []
+  const restore = withReleaseHook(async agent => {
+    seen.push(agent)
+    return { released: 'workspace', workspace_id: 'bound-ws' }
+  })
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    const res = await invoke(route!.handler, {
+      method: 'POST',
+      headers: LOCAL,
+      body: { agent: 'sess-A', workspace_id: 'victim-ws' },
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(seen, ['sess-A'], 'only the agent is forwarded to the release implementation')
+    assert.equal(res.body?.workspace_id, 'bound-ws', 'closed workspace comes from the binding, not the request')
+  } finally {
+    restore()
+    await dispose()
+  }
+})
+
+test('release: guarded like every other control-plane route', async () => {
+  const restore = withReleaseHook(async () => ({ released: 'workspace' }))
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr() })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    const m = await invoke(route!.handler, { method: 'GET', headers: LOCAL })
+    assert.equal(m.status, 405)
+    assert.equal(m.headers.allow, 'POST')
+    const h = await invoke(route!.handler, { method: 'POST', headers: { host: 'evil.example' }, body: { agent: 'x' } })
+    assert.equal(h.status, 403)
+  } finally {
+    restore()
+    await dispose()
+  }
+})
+
+test('release: the host Connection gate refuses an unauthenticated call', async () => {
+  const restore = withReleaseHook(async () => ({ released: 'workspace' }))
+  const { routes, dispose } = await loadPlugin({ fakeHerdr: makeFakeHerdr(), connection: cookieGate })
+  try {
+    const route = routes.find(r => r.path === '/herdr-workspace-release')
+    const res = await invoke(route!.handler, { method: 'POST', headers: LOCAL, body: { agent: 'sess-A' } })
+    assert.equal(res.status, 401)
+  } finally {
+    restore()
     await dispose()
   }
 })

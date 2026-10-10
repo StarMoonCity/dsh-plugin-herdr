@@ -11,6 +11,7 @@ Herdr control-plane plugin for [DeepSeek Harness (DSH)](https://github.com/deeps
 - **Control plane** — 19 `herdr_*` tools over Herdr's Unix-domain socket (snapshot, agents, panes, workspaces, layout, notifications)
 - **Session-scoped UI** — Herdr tab and side panel show only the current session's workspace; hidden outside Herdr mode
 - **Herdr mode** — create a session in Herdr mode to get a dedicated workspace that lives and dies with the session
+- **Close workspace** — the side panel's **Close workspace** button tears that workspace down and unbinds the session on demand (confirmed first; it closes every pane in the workspace, including this conversation's own pane). The host also reclaims the workspace automatically when the session's agent is disposed.
 
 ## Install
 

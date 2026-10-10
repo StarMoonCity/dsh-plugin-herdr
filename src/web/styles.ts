@@ -1018,6 +1018,11 @@ body[data-ds-dark-theme] .herdr-term-conflict-bar {
   font-size: 12px; background: var(--dsw-alias-bg-module-platform);
   border-radius: 4px; padding: 0 5px;
 }
+/* 弹窗次要说明行（确认标题下的补充信息，非粗体、低对比） */
+.herdr-modal-detail {
+  margin-top: 6px; font-size: 12px; line-height: 18px; font-weight: 400;
+  color: var(--dsw-alias-label-tertiary); word-break: break-word;
+}
 .herdr-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .herdr-modal-btn {
   border: 1px solid var(--dsw-alias-border-l2);
@@ -1058,6 +1063,18 @@ body[data-ds-dark-theme] .herdr-term-conflict-bar {
 .pane-list-head:active { cursor: grabbing; }
 .pane-list-title { font-size: 13px; font-weight: 500; line-height: 20px; }
 .pane-list-meta { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+/* 「关闭工作区」：head 内的次要动作按钮（破坏性 → 确认弹窗兜底，样式保持克制） */
+.pane-list-release {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; padding: 2px 8px; border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: 6px; background: none; cursor: pointer;
+  font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+.pane-list-release:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+}
+.pane-list-release:disabled { opacity: 0.5; cursor: default; }
 .pane-list-collapse {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; border: none; border-radius: 6px;

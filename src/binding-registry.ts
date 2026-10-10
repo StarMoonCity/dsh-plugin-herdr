@@ -87,3 +87,33 @@ export function sessionToken(agentId: string): { [key: string]: string } {
 export function sessionIdFromTokens(tokens: { [key: string]: string | null } | undefined): string | undefined {
   return tokens?.[SESSION_TOKEN_KEY] ?? undefined
 }
+
+/** 一次绑定释放的结果（面板「关闭工作区」的响应体）。 */
+export interface ReleaseOutcome {
+  /** 'workspace' = 关闭了专属 workspace；'authority' = 仅释放固定绑定的 authority。 */
+  released: 'workspace' | 'authority'
+  /** 被关闭的专属 workspace（仅 'workspace' 时存在）。 */
+  workspace_id?: string
+  /** 关闭前该 workspace 的 pane 数（快照失败时为 0）。 */
+  panes_closed?: number
+}
+
+/** 释放一个会话的绑定；该 agent 无绑定时返回 null。 */
+export type ReleaseBinding = (agentId: string) => Promise<ReleaseOutcome | null>
+
+const RELEASE_KEY = Symbol.for('dsh-plugin-herdr.release')
+
+/**
+ * 跨 bundle 的绑定释放钩子（单例槽）。
+ *
+ * session-mode 的 `bindings` 是它自己的模块级状态，而消费者插件（lib/index.mjs）
+ * 是另一个构建入口——直接 import 会得到两份模块实例，拿不到那份 Map。因此由
+ * session-mode 在 apply 时把「关 workspace + 解绑」的实现注册到这个共享槽，
+ * 消费者插件的 HTTP 路由即可完成释放，无需 import session-mode。
+ *
+ * 未注册（session-mode 未挂载）时 `release` 为 undefined，调用方应报 503。
+ */
+export function getReleaseRegistry(): { release?: ReleaseBinding } {
+  const g = globalThis as Record<symbol, { release?: ReleaseBinding } | undefined>
+  return (g[RELEASE_KEY] ??= {})
+}

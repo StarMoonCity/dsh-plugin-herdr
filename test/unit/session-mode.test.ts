@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import * as sessionMode from '../../src/session-mode.ts'
-import { getBindingRegistry } from '../../src/binding-registry.ts'
+import { getBindingRegistry, getReleaseRegistry } from '../../src/binding-registry.ts'
 
 // 注：测试直接调用 apply（与 state-report 测试一致）。真实 dsh 环境由 loader
 // 挂载组合（standing scope），事件经 scope 载体过滤后到达监听器。
@@ -530,4 +530,84 @@ test('DSH-0.2: a bind that outlives its signal does not leak the abort listener'
   assert.equal(registry.has('sess-ok'), true, 'a late abort must not tear down a settled bind')
   assert.deepEqual(calls.wsCloses, [], 'nothing to reclaim')
   void ctx.fiber.dispose()
+})
+
+// ── 面板「关闭工作区」：绑定释放语义 ────────────────────────────────────────
+
+test('release: closes the dedicated workspace, clears both tables, and reports the pane count', async () => {
+  const registry = getBindingRegistry()
+  const { ctx, calls } = makeHarness()
+  ctx.emit({} as any, 'agent/created', { agent: { id: 'sess-rel' } })
+  await flush()
+  assert.equal(registry.has('sess-rel'), true, 'precondition: bound')
+  const release = getReleaseRegistry().release
+  assert.ok(release, 'session-mode registered a release hook')
+  const outcome = await release!('sess-rel')
+  assert.equal(outcome?.released, 'workspace')
+  assert.equal(outcome?.workspace_id, 'wN1')
+  assert.equal(outcome?.panes_closed, 0, 'fake snapshot has no panes in that workspace')
+  assert.deepEqual(calls.wsCloses, ['wN1'], 'workspace closed')
+  assert.equal(registry.has('sess-rel'), false, 'registry entry removed')
+  void ctx.fiber.dispose()
+})
+
+test('release: an unknown agent returns null (route maps that to 400)', async () => {
+  const { ctx } = makeHarness()
+  const release = getReleaseRegistry().release
+  assert.ok(release)
+  assert.equal(await release!('never-bound'), null)
+  void ctx.fiber.dispose()
+})
+
+test('release: fixed-pane binding releases authority only — never closes the shared pane', async () => {
+  const registry = getBindingRegistry()
+  const { ctx, calls } = makeHarness()
+  // 固定绑定：config.paneId 非空
+  const ctx2 = new Context()
+  const calls2 = { clears: [] as Call[] }
+  ctx2.provide('herdr', {
+    snapshot: async () => ({ focused_pane_id: 'w1:p1', panes: [] }),
+    reportMetadata: async () => {},
+    paneClose: async () => { throw new Error('must not close a shared fixed pane') },
+    workspaceClose: async () => { throw new Error('must not close a workspace in fixed mode') },
+    clearAgentAuthority: async (req: Call) => { calls2.clears.push(req) },
+    reportAgent: async () => {},
+  })
+  sessionMode.apply(ctx2, { paneId: 'w1:p9', source: 'dsh:test', label: '' })
+  ctx2.emit({} as any, 'agent/created', { agent: { id: 'sess-fixed' } })
+  await flush()
+  const release = getReleaseRegistry().release
+  assert.ok(release)
+  const outcome = await release!('sess-fixed')
+  assert.equal(outcome?.released, 'authority', 'fixed bindings release authority, not the pane')
+  assert.equal(calls2.clears.length, 1, 'clearAgentAuthority called')
+  assert.equal(getBindingRegistry().has('sess-fixed'), false)
+  void ctx.fiber.dispose()
+  void ctx2.fiber.dispose()
+  void calls
+})
+
+test('release: a late agent event cannot resurrect a released binding', async () => {
+  const registry = getBindingRegistry()
+  const { ctx } = makeHarness()
+  ctx.emit({} as any, 'agent/created', { agent: { id: 'sess-late' } })
+  await flush()
+  const release = getReleaseRegistry().release
+  assert.ok(release)
+  await release!('sess-late')
+  assert.equal(registry.has('sess-late'), false)
+  // 释放后同一 agent 的 turn-stopping / request 事件不应把它写回
+  ctx.emit({} as any, 'agent/turn-stopping', { agent: { id: 'sess-late' } })
+  await flush()
+  assert.equal(registry.has('sess-late'), false, 'released binding stays released')
+  void ctx.fiber.dispose()
+})
+
+test('release: the hook is unregistered on dispose (multi-instance safe)', async () => {
+  const { ctx } = makeHarness()
+  const slot = getReleaseRegistry()
+  const mine = slot.release
+  assert.ok(mine, 'hook registered while mounted')
+  await ctx.fiber.dispose()
+  assert.notEqual(slot.release, mine, 'this instance unregistered its own hook')
 })
